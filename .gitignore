@@ -1,0 +1,27 @@
+# Build output
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Generated icon intermediates
+assets/icon_*.png
+!assets/icon.png
+assets/icon.iconset/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Debug logs
+/tmp/fhash_*
