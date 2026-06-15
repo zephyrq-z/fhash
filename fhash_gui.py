@@ -37,6 +37,26 @@ def get_immediate_subdirs(folder: Path) -> list[Path]:
     )
 
 
+def get_immediate_files(folder: Path) -> list[Path]:
+    """Get all immediate files (non-hidden) of a folder."""
+    if not folder.is_dir():
+        return []
+    return sorted(
+        f for f in folder.iterdir()
+        if f.is_file() and not f.name.startswith(".") and f.name != MAP_FILENAME
+    )
+
+
+def get_items(folder: Path, include_files: bool = False) -> list[Path]:
+    """Get subdirectories (and optionally files) of a folder."""
+    if not folder.is_dir():
+        return []
+    items = list(get_immediate_subdirs(folder))
+    if include_files:
+        items.extend(get_immediate_files(folder))
+    return sorted(items, key=lambda p: p.name)
+
+
 def load_map(folder: Path) -> dict | None:
     map_path = folder / MAP_FILENAME
     if not map_path.exists():
@@ -88,28 +108,28 @@ def resolve_conflicts(names: list[str], length: int = HASH_LENGTH) -> dict[str, 
     return resolved
 
 
-def do_encode(folder: Path, dry_run: bool = False) -> dict:
+def do_encode(folder: Path, dry_run: bool = False, include_files: bool = False) -> dict:
     """
-    Encode subfolder names. Returns result dict with keys:
+    Encode subfolder/file names. Returns result dict with keys:
       status: 'success' | 'already' | 'empty' | 'error'
       message: human-readable summary
       changes: list of (original, hashed) tuples
       dry_run: bool
     """
-    subdirs = get_immediate_subdirs(folder)
-    if not subdirs:
-        return {"status": "empty", "message": "No subdirectories found.", "changes": [], "dry_run": dry_run}
+    items = get_items(folder, include_files=include_files)
+    if not items:
+        return {"status": "empty", "message": "No subdirectories or files found.", "changes": [], "dry_run": dry_run}
 
     existing_map = load_map(folder)
     if existing_map is not None:
         mapped_hashes = set(existing_map.keys()) - {META_KEY}
-        to_hash = [d for d in subdirs if d.name not in mapped_hashes]
+        to_hash = [d for d in items if d.name not in mapped_hashes]
         if not to_hash:
-            return {"status": "already", "message": "All subdirectories are already hashed.", "changes": [], "dry_run": dry_run}
+            return {"status": "already", "message": "All items are already hashed.", "changes": [], "dry_run": dry_run}
         mapping = existing_map
     else:
         mapping = {META_KEY: {"created": datetime.now(timezone.utc).isoformat(), "hash_algo": f"sha256_{HASH_LENGTH}char"}}
-        to_hash = subdirs
+        to_hash = items
 
     names_to_hash = [d.name for d in to_hash]
     hash_map = resolve_conflicts(names_to_hash)
@@ -118,7 +138,7 @@ def do_encode(folder: Path, dry_run: bool = False) -> dict:
     changes = [(d.name, name_to_hash[d.name]) for d in to_hash]
 
     if dry_run:
-        return {"status": "success", "message": f"[Preview] {len(to_hash)} folder(s) would be hashed.", "changes": changes, "dry_run": True}
+        return {"status": "success", "message": f"[Preview] {len(to_hash)} item(s) would be hashed.", "changes": changes, "dry_run": True}
 
     # Backup existing map
     map_path = folder / MAP_FILENAME
@@ -140,10 +160,10 @@ def do_encode(folder: Path, dry_run: bool = False) -> dict:
 
     if errors:
         return {"status": "error", "message": f"{len(to_hash) - len(errors)} hashed, {len(errors)} error(s):\n" + "\n".join(errors), "changes": changes, "dry_run": False}
-    return {"status": "success", "message": f"✅ {len(to_hash)} folder(s) hashed.", "changes": changes, "dry_run": False}
+    return {"status": "success", "message": f"✅ {len(to_hash)} item(s) hashed.", "changes": changes, "dry_run": False}
 
 
-def do_decode(folder: Path, dry_run: bool = False) -> dict:
+def do_decode(folder: Path, dry_run: bool = False, include_files: bool = False) -> dict:
     mapping = load_map(folder)
     if mapping is None:
         return {"status": "error", "message": f"No mapping file ({MAP_FILENAME}) found.", "changes": [], "dry_run": dry_run}
@@ -154,16 +174,19 @@ def do_decode(folder: Path, dry_run: bool = False) -> dict:
 
     to_restore = []
     for h, name in hash_to_name.items():
-        if (folder / h).is_dir():
+        hashed_path = folder / h
+        if hashed_path.is_dir():
+            to_restore.append((h, name))
+        elif include_files and hashed_path.is_file():
             to_restore.append((h, name))
 
     if not to_restore:
-        return {"status": "empty", "message": "No hashed folders found to restore.", "changes": [], "dry_run": dry_run}
+        return {"status": "empty", "message": "No hashed items found to restore.", "changes": [], "dry_run": dry_run}
 
     changes = [(h, name) for h, name in to_restore]
 
     if dry_run:
-        return {"status": "success", "message": f"[Preview] {len(to_restore)} folder(s) would be restored.", "changes": changes, "dry_run": True}
+        return {"status": "success", "message": f"[Preview] {len(to_restore)} item(s) would be restored.", "changes": changes, "dry_run": True}
 
     map_path = folder / MAP_FILENAME
     if map_path.exists():
@@ -194,26 +217,28 @@ def do_decode(folder: Path, dry_run: bool = False) -> dict:
 
     if errors:
         return {"status": "error", "message": f"{len(to_restore) - len(errors)} restored, {len(errors)} error(s):\n" + "\n".join(errors), "changes": changes, "dry_run": False}
-    return {"status": "success", "message": f"✅ {len(to_restore)} folder(s) restored.", "changes": changes, "dry_run": False}
+    return {"status": "success", "message": f"✅ {len(to_restore)} item(s) restored.", "changes": changes, "dry_run": False}
 
 
-def do_list(folder: Path) -> list[dict]:
-    """Return list of {name, status, original_or_hash} for each subfolder."""
-    subdirs = get_immediate_subdirs(folder)
+def do_list(folder: Path, include_files: bool = False) -> list[dict]:
+    """Return list of {name, type, status, original_or_hash} for each item."""
+    items = get_items(folder, include_files=include_files)
     mapping = load_map(folder)
     result = []
 
     if mapping is None:
-        for d in subdirs:
-            result.append({"name": d.name, "status": "original", "detail": "—"})
+        for d in items:
+            kind = "file" if d.is_file() else "dir"
+            result.append({"name": d.name, "type": kind, "status": "original", "detail": "—"})
         return result
 
     hash_to_name = {k: v for k, v in mapping.items() if k != META_KEY}
-    for d in subdirs:
+    for d in items:
+        kind = "file" if d.is_file() else "dir"
         if d.name in hash_to_name:
-            result.append({"name": d.name, "status": "hashed", "detail": hash_to_name[d.name]})
+            result.append({"name": d.name, "type": kind, "status": "hashed", "detail": hash_to_name[d.name]})
         else:
-            result.append({"name": d.name, "status": "original", "detail": "—"})
+            result.append({"name": d.name, "type": kind, "status": "original", "detail": "—"})
     return result
 
 
@@ -221,9 +246,9 @@ def do_list(folder: Path) -> list[dict]:
 class FhashApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title(f"{APP_NAME} — Folder Hasher v{APP_VERSION}")
-        self.root.geometry("720x520")
-        self.root.minsize(600, 400)
+        self.root.title(f"{APP_NAME} — File & Folder Hasher v{APP_VERSION}")
+        self.root.geometry("800x520")
+        self.root.minsize(700, 400)
 
         # macOS-specific tweaks
         if platform.system() == "Darwin":
@@ -240,7 +265,7 @@ class FhashApp:
             self.root.after(100, self._refresh_list)
 
     def _build_ui(self):
-        # ── Top: Folder selector ──
+        # ── Top: Folder selector + options ──
         top_frame = ttk.Frame(self.root, padding=10)
         top_frame.pack(fill=tk.X)
 
@@ -250,18 +275,24 @@ class FhashApp:
         self.path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 4))
         self.path_var.trace_add("write", lambda *_: self._on_path_change())
 
-        ttk.Button(top_frame, text="Browse…", command=self._browse).pack(side=tk.LEFT)
+        ttk.Button(top_frame, text="Browse…", command=self._browse).pack(side=tk.LEFT, padx=(0, 8))
+
+        self.include_files_var = tk.BooleanVar(value=True)
+        self.files_check = ttk.Checkbutton(top_frame, text="Include files", variable=self.include_files_var, command=self._refresh_list)
+        self.files_check.pack(side=tk.LEFT)
 
         # ── Middle: Treeview table ──
         mid_frame = ttk.Frame(self.root, padding=(10, 0, 10, 0))
         mid_frame.pack(fill=tk.BOTH, expand=True)
 
-        cols = ("name", "status", "detail")
+        cols = ("name", "type", "status", "detail")
         self.tree = ttk.Treeview(mid_frame, columns=cols, show="headings", selectmode="extended")
-        self.tree.heading("name", text="Folder Name")
+        self.tree.heading("name", text="Name")
+        self.tree.heading("type", text="Type")
         self.tree.heading("status", text="Status")
         self.tree.heading("detail", text="Detail")
         self.tree.column("name", width=260, minwidth=120)
+        self.tree.column("type", width=50, minwidth=40, anchor=tk.CENTER)
         self.tree.column("status", width=80, minwidth=60, anchor=tk.CENTER)
         self.tree.column("detail", width=260, minwidth=120)
 
@@ -309,7 +340,8 @@ class FhashApp:
             return
 
         folder = Path(path).resolve()
-        items = do_list(folder)
+        include_files = self.include_files_var.get()
+        items = do_list(folder, include_files=include_files)
 
         # Clear tree
         for item in self.tree.get_children():
@@ -317,7 +349,7 @@ class FhashApp:
 
         for item in items:
             tag = item["status"]
-            self.tree.insert("", tk.END, values=(item["name"], item["status"], item["detail"]), tags=(tag,))
+            self.tree.insert("", tk.END, values=(item["name"], item["type"], item["status"], item["detail"]), tags=(tag,))
 
         # Tag styling
         self.tree.tag_configure("hashed", foreground="#2e7d32")  # green
@@ -329,7 +361,7 @@ class FhashApp:
             original_count = sum(1 for i in items if i["status"] == "original")
             self.status_var.set(f"📂 {folder} — {hashed_count} hashed, {original_count} original")
         else:
-            self.status_var.set(f"📂 {folder} — {len(items)} folder(s), not encoded")
+            self.status_var.set(f"📂 {folder} — {len(items)} item(s), not encoded")
 
     def _action(self, action: str):
         path = self.path_var.get().strip()
@@ -338,20 +370,21 @@ class FhashApp:
             return
 
         folder = Path(path).resolve()
+        include_files = self.include_files_var.get()
 
         if action == "preview_encode":
-            result = do_encode(folder, dry_run=True)
+            result = do_encode(folder, dry_run=True, include_files=include_files)
             self._show_preview("Preview: Encode", result)
             return
 
         if action == "preview_decode":
-            result = do_decode(folder, dry_run=True)
+            result = do_decode(folder, dry_run=True, include_files=include_files)
             self._show_preview("Preview: Decode", result)
             return
 
         if action == "encode":
             # First show preview
-            preview = do_encode(folder, dry_run=True)
+            preview = do_encode(folder, dry_run=True, include_files=include_files)
             if preview["status"] in ("empty", "already"):
                 messagebox.showinfo("Encode", preview["message"])
                 self._refresh_list()
@@ -360,12 +393,12 @@ class FhashApp:
             changes_text = "\n".join(f"  {orig} → {hashed}" for orig, hashed in preview["changes"])
             confirm = messagebox.askyesno(
                 "Confirm Encode",
-                f"The following {len(preview['changes'])} folder(s) will be hashed:\n\n{changes_text}\n\nProceed?",
+                f"The following {len(preview['changes'])} item(s) will be hashed:\n\n{changes_text}\n\nProceed?",
             )
             if not confirm:
                 return
 
-            result = do_encode(folder, dry_run=False)
+            result = do_encode(folder, dry_run=False, include_files=include_files)
             self.status_var.set(result["message"])
             if result["status"] == "error":
                 messagebox.showerror("Encode Error", result["message"])
@@ -374,7 +407,7 @@ class FhashApp:
             self._refresh_list()
 
         elif action == "decode":
-            preview = do_decode(folder, dry_run=True)
+            preview = do_decode(folder, dry_run=True, include_files=include_files)
             if preview["status"] in ("empty", "error"):
                 messagebox.showinfo("Decode", preview["message"])
                 self._refresh_list()
@@ -383,12 +416,12 @@ class FhashApp:
             changes_text = "\n".join(f"  {hashed} → {orig}" for hashed, orig in preview["changes"])
             confirm = messagebox.askyesno(
                 "Confirm Decode",
-                f"The following {len(preview['changes'])} folder(s) will be restored:\n\n{changes_text}\n\nProceed?",
+                f"The following {len(preview['changes'])} item(s) will be restored:\n\n{changes_text}\n\nProceed?",
             )
             if not confirm:
                 return
 
-            result = do_decode(folder, dry_run=False)
+            result = do_decode(folder, dry_run=False, include_files=include_files)
             self.status_var.set(result["message"])
             if result["status"] == "error":
                 messagebox.showerror("Decode Error", result["message"])

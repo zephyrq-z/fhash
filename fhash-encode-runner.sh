@@ -4,7 +4,7 @@
 
 FHASH="$HOME/bin/fhash"
 if [ ! -f "$FHASH" ]; then
-    FHASH="$HOME/Developer/gitHub/fhash/fhash.py"
+    FHASH="$HOME/Developer/tools-set/fhash/fhash.py"
 fi
 
 if [ $# -eq 0 ]; then
@@ -22,7 +22,7 @@ SUCCESS=0
 
 for f in "$@"; do
     if [ -d "$f" ]; then
-        OUTPUT=$(python3 "$FHASH" encode "$f" --yes 2>&1)
+        OUTPUT=$(python3 "$FHASH" encode "$f" --files --yes 2>&1)
         if [ $? -eq 0 ]; then
             LAST_LINE=$(echo "$OUTPUT" | tail -1)
             SUCCESS=$((SUCCESS + 1))

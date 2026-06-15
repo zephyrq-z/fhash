@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-fhash — Folder name hashing tool for macOS.
+fhash — File & folder name hashing tool for macOS.
 
-Encode subfolder names to SHA-256 short hashes (8 chars) and decode them back.
+Encode subfolder/file names to SHA-256 short hashes (8 chars) and decode them back.
 A hidden mapping file (.folder_hash_map.json) is maintained in the target folder.
 
 Usage:
-    fhash encode /path/to/folder [--dry-run] [--yes]
-    fhash decode /path/to/folder [--dry-run] [--yes]
-    fhash list   /path/to/folder
+    fhash encode /path/to/folder [--files] [--dry-run] [--yes]
+    fhash decode /path/to/folder [--files] [--dry-run] [--yes]
+    fhash list   /path/to/folder [--files]
 """
 
 from __future__ import annotations
@@ -36,6 +36,28 @@ def get_immediate_subdirs(folder: Path) -> list[Path]:
         d for d in folder.iterdir()
         if d.is_dir() and not d.name.startswith(".")
     )
+
+
+def get_immediate_files(folder: Path) -> list[Path]:
+    """Get all immediate files (non-hidden) of a folder."""
+    if not folder.is_dir():
+        print(f"Error: '{folder}' is not a directory.", file=sys.stderr)
+        sys.exit(1)
+    return sorted(
+        f for f in folder.iterdir()
+        if f.is_file() and not f.name.startswith(".") and f.name != MAP_FILENAME
+    )
+
+
+def get_items(folder: Path, include_files: bool = False) -> list[Path]:
+    """Get subdirectories (and optionally files) of a folder."""
+    if not folder.is_dir():
+        print(f"Error: '{folder}' is not a directory.", file=sys.stderr)
+        sys.exit(1)
+    items = list(get_immediate_subdirs(folder))
+    if include_files:
+        items.extend(get_immediate_files(folder))
+    return sorted(items, key=lambda p: p.name)
 
 
 def load_map(folder: Path) -> dict | None:
@@ -102,48 +124,51 @@ def resolve_conflicts(names: list[str], length: int = HASH_LENGTH) -> dict[str, 
 
 
 def cmd_encode(args) -> None:
-    """Encode subfolder names to hashes."""
+    """Encode subfolder/file names to hashes."""
     folder = Path(args.folder).resolve()
-    subdirs = get_immediate_subdirs(folder)
+    include_files = getattr(args, 'files', False)
+    items = get_items(folder, include_files=include_files)
 
-    if not subdirs:
-        print("No subdirectories found.")
+    if not items:
+        print("No subdirectories or files found.")
         return
 
     existing_map = load_map(folder)
     if existing_map is not None:
-        # Check if already encoded — filter out already-hashed folders
+        # Check if already encoded — filter out already-hashed items
         mapped_hashes = set(existing_map.keys()) - {META_KEY}
-        already_hashed = [d for d in subdirs if d.name in mapped_hashes]
-        to_hash = [d for d in subdirs if d.name not in mapped_hashes]
+        already_hashed = [d for d in items if d.name in mapped_hashes]
+        to_hash = [d for d in items if d.name not in mapped_hashes]
 
         if not to_hash:
-            print("All subdirectories are already hashed. Nothing to do.")
+            print("All items are already hashed. Nothing to do.")
             return
 
         if already_hashed:
-            print(f"Note: {len(already_hashed)} folder(s) already hashed, skipping them.")
+            print(f"Note: {len(already_hashed)} item(s) already hashed, skipping them.")
 
         # Merge with existing mapping
         mapping = existing_map
     else:
         mapping = {META_KEY: {"created": datetime.now(timezone.utc).isoformat(), "hash_algo": f"sha256_{HASH_LENGTH}char"}}
-        to_hash = subdirs
+        to_hash = items
 
-    # Compute hashes for folders that need encoding
+    # Compute hashes for items that need encoding
     names_to_hash = [d.name for d in to_hash]
     hash_map = resolve_conflicts(names_to_hash)
     # hash_map is {hash: name}, we need {name: hash}
     name_to_hash = {name: h for h, name in hash_map.items()}
 
     # Display preview
-    print(f"\n{'Original Name':<30} {'→':^3} {'Hashed Name'}")
-    print(f"{'─' * 30} {'─' * 3} {'─' * 12}")
+    item_type = "item(s)" if include_files else "folder(s)"
+    print(f"\n{'Original Name':<30} {'Type':<6} {'→':^3} {'Hashed Name'}")
+    print(f"{'─' * 30} {'─' * 6} {'─' * 3} {'─' * 12}")
     for d in to_hash:
         h = name_to_hash[d.name]
-        print(f"{d.name:<30} {'→':^3} {h}")
+        kind = "file" if d.is_file() else "dir"
+        print(f"{d.name:<30} {kind:<6} {'→':^3} {h}")
 
-    print(f"\n{len(to_hash)} folder(s) will be renamed.")
+    print(f"\n{len(to_hash)} {item_type} will be renamed.")
 
     if args.dry_run:
         print("\n[dry-run] No changes made.")
@@ -161,7 +186,7 @@ def cmd_encode(args) -> None:
         backup_path = folder / (MAP_FILENAME + ".bak")
         shutil.copy2(map_path, backup_path)
 
-    # Rename folders
+    # Rename items
     errors = []
     for d in to_hash:
         h = name_to_hash[d.name]
@@ -180,12 +205,13 @@ def cmd_encode(args) -> None:
         for err in errors:
             print(err)
     else:
-        print(f"\n✅ Done. {len(to_hash)} folder(s) hashed. Mapping saved to {MAP_FILENAME}")
+        print(f"\n✅ Done. {len(to_hash)} {item_type} hashed. Mapping saved to {MAP_FILENAME}")
 
 
 def cmd_decode(args) -> None:
-    """Decode hashed folder names back to originals."""
+    """Decode hashed folder/file names back to originals."""
     folder = Path(args.folder).resolve()
+    include_files = getattr(args, 'files', False)
     mapping = load_map(folder)
 
     if mapping is None:
@@ -199,24 +225,28 @@ def cmd_decode(args) -> None:
         print("Mapping file is empty. Nothing to decode.")
         return
 
-    # Find which hashed folders actually exist
+    # Find which hashed items actually exist (dirs + optionally files)
     to_restore = []
     for h, name in hash_to_name.items():
         hashed_path = folder / h
         if hashed_path.is_dir():
             to_restore.append((hashed_path, h, name))
+        elif include_files and hashed_path.is_file():
+            to_restore.append((hashed_path, h, name))
 
     if not to_restore:
-        print("No hashed folders found to restore.")
+        print("No hashed items found to restore.")
         return
 
     # Display preview
-    print(f"\n{'Hashed Name':<12} {'→':^3} {'Original Name'}")
-    print(f"{'─' * 12} {'─' * 3} {'─' * 30}")
-    for _, h, name in to_restore:
-        print(f"{h:<12} {'→':^3} {name}")
+    item_type = "item(s)" if include_files else "folder(s)"
+    print(f"\n{'Hashed Name':<12} {'Type':<6} {'→':^3} {'Original Name'}")
+    print(f"{'─' * 12} {'─' * 6} {'─' * 3} {'─' * 30}")
+    for path, h, name in to_restore:
+        kind = "file" if path.is_file() else "dir"
+        print(f"{h:<12} {kind:<6} {'→':^3} {name}")
 
-    print(f"\n{len(to_restore)} folder(s) will be restored.")
+    print(f"\n{len(to_restore)} {item_type} will be restored.")
 
     if args.dry_run:
         print("\n[dry-run] No changes made.")
@@ -234,7 +264,7 @@ def cmd_decode(args) -> None:
         backup_path = folder / (MAP_FILENAME + ".bak")
         shutil.copy2(map_path, backup_path)
 
-    # Rename folders back
+    # Rename items back
     errors = []
     restored_hashes = []
     for hashed_path, h, name in to_restore:
@@ -263,23 +293,25 @@ def cmd_decode(args) -> None:
         for err in errors:
             print(err)
     else:
-        print(f"\n✅ Done. {len(to_restore)} folder(s) restored to original names.")
+        print(f"\n✅ Done. {len(to_restore)} {item_type} restored to original names.")
 
 
 def cmd_list(args) -> None:
     """List current mapping without modifying anything."""
     folder = Path(args.folder).resolve()
-    subdirs = get_immediate_subdirs(folder)
+    include_files = getattr(args, 'files', False)
+    items = get_items(folder, include_files=include_files)
     mapping = load_map(folder)
 
     if mapping is None:
-        # No mapping — show folders as-is
+        # No mapping — show items as-is
         print(f"\nFolder: {folder}")
         print("Status: Not encoded (no mapping file)\n")
-        print(f"{'Folder Name':<40} {'Status'}")
-        print(f"{'─' * 40} {'─' * 10}")
-        for d in subdirs:
-            print(f"{d.name:<40} original")
+        print(f"{'Name':<40} {'Type':<6} {'Status'}")
+        print(f"{'─' * 40} {'─' * 6} {'─' * 10}")
+        for d in items:
+            kind = "file" if d.is_file() else "dir"
+            print(f"{d.name:<40} {kind:<6} original")
         return
 
     hash_to_name = {k: v for k, v in mapping.items() if k != META_KEY}
@@ -289,20 +321,21 @@ def cmd_list(args) -> None:
     print(f"Created: {meta.get('created', 'unknown')}")
     print(f"Algorithm: {meta.get('hash_algo', 'unknown')}\n")
 
-    print(f"{'Hash / Name':<40} {'Status':<12} {'Original Name'}")
-    print(f"{'─' * 40} {'─' * 12} {'─' * 30}")
+    print(f"{'Hash / Name':<40} {'Type':<6} {'Status':<12} {'Original Name'}")
+    print(f"{'─' * 40} {'─' * 6} {'─' * 12} {'─' * 30}")
 
-    for d in subdirs:
+    for d in items:
+        kind = "file" if d.is_file() else "dir"
         if d.name in hash_to_name:
             original = hash_to_name[d.name]
-            print(f"{d.name:<40} {'hashed':<12} {original}")
+            print(f"{d.name:<40} {kind:<6} {'hashed':<12} {original}")
         else:
-            print(f"{d.name:<40} {'original':<12} —")
+            print(f"{d.name:<40} {kind:<6} {'original':<12} —")
 
-    # Check for mapping entries without corresponding folders
-    orphaned = [h for h in hash_to_name if not (folder / h).is_dir()]
+    # Check for mapping entries without corresponding items
+    orphaned = [h for h in hash_to_name if not (folder / h).exists()]
     if orphaned:
-        print(f"\n⚠️  {len(orphaned)} orphaned mapping entry(ies) (folder not found):")
+        print(f"\n⚠️  {len(orphaned)} orphaned mapping entry(ies) (item not found):")
         for h in orphaned:
             print(f"  {h} → {hash_to_name[h]}")
 
@@ -310,22 +343,23 @@ def cmd_list(args) -> None:
 def main():
     parser = argparse.ArgumentParser(
         prog="fhash",
-        description="Folder name hashing tool — encode/decode subfolder names with SHA-256.",
+        description="File & folder name hashing tool — encode/decode names with SHA-256.",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     def add_common_args(p):
         p.add_argument("folder", nargs="?", default=None, help="Target folder path (default: current directory)")
         p.add_argument("-n", "--dir", dest="target_dir", help="Target folder path (alternative to positional arg)")
+        p.add_argument("-f", "--files", action="store_true", help="Include files (not just folders) in hashing")
 
     # encode
-    enc_parser = subparsers.add_parser("encode", help="Hash subfolder names")
+    enc_parser = subparsers.add_parser("encode", help="Hash subfolder/file names")
     add_common_args(enc_parser)
     enc_parser.add_argument("--dry-run", action="store_true", help="Preview only, no changes")
     enc_parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
 
     # decode
-    dec_parser = subparsers.add_parser("decode", help="Restore original folder names")
+    dec_parser = subparsers.add_parser("decode", help="Restore original names")
     add_common_args(dec_parser)
     dec_parser.add_argument("--dry-run", action="store_true", help="Preview only, no changes")
     dec_parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
